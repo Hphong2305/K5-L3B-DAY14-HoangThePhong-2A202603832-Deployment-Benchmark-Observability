@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: day14-production-agent
+    runtime: docker
+    dockerfilePath: 06-lab-complete/Dockerfile
+    dockerContext: 06-lab-complete
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: AGENT_API_KEY
+        generateValue: true
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "10"
+      - key: DAILY_BUDGET_USD
+        value: "1.0"
+      - key: MONTHLY_BUDGET_USD
+        value: "10.0"
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: day14-agent-redis
+          property: connectionString
+
+  - type: redis
+    name: day14-agent-redis
+    plan: free
+    ipAllowList: []

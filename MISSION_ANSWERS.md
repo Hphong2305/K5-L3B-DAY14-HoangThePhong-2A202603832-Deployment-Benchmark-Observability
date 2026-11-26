@@ -510,3 +510,27 @@ Kết quả chạy `python check_production_ready.py` đầy đủ (với Docker
 2. **Step 2 — `build` (`gcr.io/cloud-builders/docker`, `waitFor: [test]`):** Build Docker image gắn 2 tag (`:$COMMIT_SHA` để định danh chính xác bản commit và `:latest`), có tận dụng `--cache-from` từ image `:latest` trước đó để tăng tốc độ build.
 3. **Step 3 — `push` (`gcr.io/cloud-builders/docker`, `waitFor: [build]`):** Đẩy toàn bộ Docker image tags vừa build lên Google Container Registry (`gcr.io/$PROJECT_ID/ai-agent`).
 4. **Step 4 — `deploy` (`gcr.io/cloud-builders/gcloud`, `waitFor: [push]`):** Deploy image `:$COMMIT_SHA` lên **Google Cloud Run** tại region `asia-southeast1` theo cấu hình chuẩn production (tương ứng với đặc tả Knative trong `service.yaml`): tự động scale `min-instances=1` (tránh cold start) đến `max-instances=10`, giới hạn mỗi container `512Mi` RAM / `1 CPU` / concurrency `80` requests, lấy secret an toàn từ **Google Secret Manager** (`--set-secrets` / `secretKeyRef`) và giám sát bằng `startupProbe` (`/ready`) cùng `livenessProbe` (`/health`).
+
+---
+
+## AI Log
+
+Theo quy định tại [RULES.md](RULES.md), sinh viên ghi chép trung thực toàn bộ quá trình sử dụng Trợ lý AI (Google Antigravity AI Assistant) trong bài tập Day 14:
+
+### 1. Phạm vi sử dụng và Prompt đã đưa ra
+- **Prompt 1 (Phân tích tổng thể & Lập kế hoạch theo Checkpoint):** *"b hãy đọc dự án và cho t biết những việc cần làm"* & *"làm hết cho t, xong cp nào đẩy lên git giúp t đẩy từng cp"*.
+- **Prompt 2 (Docker & API Security - CP1 -> CP4):** Yêu cầu phân tích sự khác biệt giữa Localhost và Production, viết `Dockerfile` multi-stage tối ưu dung lượng, đo lường kích thước image thật (`docker images`), cấu hình Redis rate limiter và Cost Guard, ghi log các lệnh `curl` thực tế có che mờ token.
+- **Prompt 3 (Production Readiness Check - CP5):** Yêu cầu rà soát toàn bộ source code `06-lab-complete/app/` (`config.py`, `redis_client.py`, `auth.py`, `rate_limiter.py`, `cost_guard.py`, `main.py`) để chạy script kiểm thử độc lập `check_production_ready.py`.
+- **Prompt 4 (Cloud Deployment - CP6):** Yêu cầu hoàn thiện `DEPLOYMENT.md`, so sánh chuyên sâu `railway.toml` và `render.yaml`, phân tích quy trình CI/CD Google Cloud Run.
+- **Prompt 5 (Benchmark & Observability - CP7 & CP8):** Yêu cầu chạy tải `load_test.py` theo ma trận concurrency, chạy bộ đánh giá `run_eval.py`, phân tích nguyên nhân sai sót của câu `scaling-03` và `security-02`, cập nhật `KNOWLEDGE_BASE` trong `mock_llm.py` để đạt độ chính xác 100%, chạy Locust load test cho scale 1 và scale 3, thu thập traces từ Jaeger và alerts từ Prometheus để hoàn thiện `BENCHMARK_REPORT.md` và 7 ảnh chụp màn hình trong `screenshots/`.
+
+### 2. Kết quả nhận được và Đánh giá / Code Review của sinh viên
+- **Source code Part 6 (`06-lab-complete/app/`):** AI sinh mã nguồn khởi tạo. Sinh viên đã trực tiếp review và phát hiện lỗi thiếu biến môi trường `PYTHONUSERBASE` trong `Dockerfile` khiến container không tìm thấy dependencies của user non-root `agent`; đã chỉnh sửa và xác thực với `check_production_ready.py` đạt **12/12 passed (100%)**.
+- **Sửa Knowledge Base (`mock_llm.py`):** AI gợi ý sửa câu hỏi eval, tuy nhiên sinh viên tuân thủ nghiêm ngặt [RULES.md](RULES.md) (không được sửa file `golden_dataset.jsonl`), chỉ bổ sung tài liệu về Kubernetes HPA và JSON Web Token (JWT) vào `KNOWLEDGE_BASE` trong `utils/mock_llm.py`. Kết quả: độ chính xác tăng từ 91.3% lên **100% (23/23)** với 0 regression.
+- **Số liệu Benchmark & Observability:** Toàn bộ số liệu trong `BENCHMARK_REPORT.md` không dùng số giả định, mà được trích xuất từ các file output chạy thực nghiệm: `load_v2_c*.json`, `eval_v*.json`, `scale_1_stats.csv`, `scale_3_stats.csv`, Prometheus alerts API và Jaeger trace API.
+
+### 3. Quy trình tự kiểm tra và Xác thực độc lập (Verification)
+- Kiểm tra `check_production_ready.py`: `PASS 12/12`.
+- Kiểm tra tính toàn vẹn git: Không commit file `.env` chứa secret thật (`git log --all --oneline -- '*.env'`).
+- Kiểm tra cấu trúc thư mục nộp bài: Đảm bảo đầy đủ `MISSION_ANSWERS.md`, `DEPLOYMENT.md`, `06-lab-complete/`, `BENCHMARK_REPORT.md`, `reports/`, `benchmark-results/`, và 7 file ảnh trong `screenshots/`.
+

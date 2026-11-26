@@ -83,4 +83,77 @@
 
 ## 4. Observability stack (production)
 
-*(Đang chạy Docker stack cho CP8 — sẽ cập nhật kết quả thực nghiệm Bước 2 ngay ở CP8)*
+### 4.1 Screenshot
+
+- [x] Dashboard Grafana khi đang có tải (thấy rõ Golden Signals): [screenshots/grafana-dashboard.png](file:///Users/phong/Desktop/BaiTapVinUni/K5-L3B-DAY14-HoangThePhong-2A202603832-Deployment-Benchmark-Observability/screenshots/grafana-dashboard.png)
+- [x] Một trace chậm trong Jaeger (thấy span nào chiếm thời gian): [screenshots/jaeger-slow-trace.png](file:///Users/phong/Desktop/BaiTapVinUni/K5-L3B-DAY14-HoangThePhong-2A202603832-Deployment-Benchmark-Observability/screenshots/jaeger-slow-trace.png)
+- [x] Một trace lỗi trong Jaeger (có event `exception`): [screenshots/jaeger-error-trace.png](file:///Users/phong/Desktop/BaiTapVinUni/K5-L3B-DAY14-HoangThePhong-2A202603832-Deployment-Benchmark-Observability/screenshots/jaeger-error-trace.png)
+- [x] Trang Alerts của Prometheus với ít nhất 1 alert đang **firing**: [screenshots/prometheus-alert-firing.png](file:///Users/phong/Desktop/BaiTapVinUni/K5-L3B-DAY14-HoangThePhong-2A202603832-Deployment-Benchmark-Observability/screenshots/prometheus-alert-firing.png)
+
+### 4.2 Thí nghiệm "phá hệ thống"
+
+| # | Thay đổi | Alert nào firing | Thời gian từ lúc đổi → firing | Panel nào phản ánh rõ nhất |
+|---|---|---|---|---|
+| A | `MOCK_ERROR_RATE=0.2` | `AgentHighErrorRate` | ~1m (`for: 1m` khi error rate > 5%) | Panel **Error Rate (%)** trên Grafana vọt lên 22.4% |
+| B | `MOCK_SLOW_RATE=0.3` | `AgentHighLatencyP95` | ~2m (`for: 2m` khi p95 > 1s) | Panel **Response Latency Percentiles** (p95 vọt lên ~1.958s) |
+| C | `LLM_MODEL=mock-llm-large` | `LLMCostBurnRateHigh` | ~2m (`for: 2m` khi burn rate > $2/hr) | Panel **Hourly Cost Burn Rate** (vọt lên $9.73/hr) |
+| D | `docker pause` 1 instance | `AgentInstanceDown` | ~30s (`for: 30s` scrape fail) | Panel **Healthy Instances / Up Status** (tụt từ 3 xuống 2) |
+| E | `AGENT_VERSION=v1` | *Không có alert nào firing* | N/A | Panel **Request Throughput & Latency** (v1 phản hồi bình thường 200 OK) |
+
+**Thí nghiệm E không làm alert nào firing. Bạn sẽ phát hiện loại sự cố này trong production bằng cách nào?**
+
+1. **Nguyên nhân không firing:** Các Golden Signals và health check hạ tầng (Prometheus, Jaeger) chỉ theo dõi tầng kỹ thuật: mã trạng thái HTTP (200 OK), độ trễ (latency thấp ~180 ms), tỷ lệ lỗi mạng (0%), và tài nguyên CPU/RAM. Khi chuyển sang `v1`, API vẫn trả lời rất nhanh và không hề có crash/exception, do đó hệ thống giám sát hạ tầng nhận định là hoàn toàn "bình thường/khỏe mạnh", dù chất lượng câu trả lời đã suy thoái nghiêm trọng (accuracy sụt từ 100% xuống 4.3%).
+2. **Cách phát hiện trong môi trường Production:**
+   - **Continuous Synthetic Probing / Online Evaluation:** Chạy một worker ngầm định kỳ (ví dụ mỗi 5–15 phút) gửi bộ câu hỏi chuẩn (golden evaluation dataset) đến production endpoint và dùng LLM-as-a-Judge chấm điểm semantic relevance & accuracy. Nếu accuracy rơi xuống dưới ngưỡng (ví dụ < 85%), hệ thống kích hoạt alert `AgentSemanticQualityDegraded`.
+   - **User Feedback & Behavior Signals:** Theo dõi metric phản hồi người dùng (tỷ lệ nhấn dislike/thumbs-down, tỷ lệ người dùng phải hỏi lại - re-prompt rate, độ dài phiên hội thoại). Khi tỷ lệ negative feedback tăng đột biến (> 10%), kích hoạt cảnh báo suy giảm trải nghiệm.
+   - **Output Token & Embedding Drift Monitoring:** Giám sát phân phối độ dài câu trả lời (v1 trả lời trung bình ~57 tokens so với v2 ~114 tokens) và vector embedding khoảng cách ngữ nghĩa so với baseline để phát hiện model/prompt drift.
+
+### 4.3 Debug bằng trace
+
+Chọn 1 trace chậm nhất bạn tìm được:
+
+- `trace_id`: `956189035ddfad904276ef5c5606d297`
+- Tổng thời gian: `1731.28 ms`
+- Span chiếm nhiều thời gian nhất: `chat mock-llm-small` (`1696.81 ms`, `98.01%`)
+- Dòng log tương ứng (grep theo `trace_id`):
+
+```json
+{"event": "llm_call", "trace_id": "956189035ddfad904276ef5c5606d297", "span_id": "8bf89f293bd6d464", "request_id": "631e62627bcb", "model": "mock-llm-small", "agent_version": "v2", "input_tokens": 69, "output_tokens": 31, "cost_usd": 2.9e-05, "llm_ms": 1692.3}
+```
+
+---
+
+## 5. Benchmark scaling (production, Locust headless, 100 users, 2 phút)
+
+| Số instance | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Failures |
+|---|---|---|---|---|---|
+| 1 | 59.61 req/s (Agg: 65.73) | 200 ms (Agg: 190) | 230 ms (Agg: 230) | 1700 ms | 71 (1.00%) |
+| 3 | 60.16 req/s (Agg: 66.32) | 190 ms (Agg: 190) | 230 ms (Agg: 220) | 1700 ms | 73 (1.02%) |
+
+*(Ghi chú: Số liệu trên trích xuất trực tiếp từ file `benchmark-results/scale_1_stats.csv` và `benchmark-results/scale_3_stats.csv` cho endpoint `POST /ask` và dòng tổng hợp `Aggregated` tương ứng).*
+
+**Giải thích kết quả:** Scale có cải thiện p95 không? Nút thắt nằm ở đâu?
+
+- **Scale từ 1 lên 3 instance không làm giảm đáng kể p95:** `p95` giữ nguyên ở mức `220–230 ms`, và `p99` cố định ở mức `1700 ms`.
+- **Nút thắt thực sự (Bottleneck):**
+  - Trái với các ứng dụng tính toán nặng CPU nơi việc nhân rộng số instance giúp giải tỏa hàng đợi, Agent LLM là ứng dụng thuần túy I/O-bound.
+  - Nút thắt thời gian nằm hoàn toàn ở **thời gian phản hồi của upstream LLM** (`MOCK_LATENCY_MS = 180 ms` và khi gặp 3% tail latency `MOCK_SLOW_MS = 1500 ms` thì tổng latency của span LLM vọt lên `~1700 ms`).
+  - Việc tăng thêm số lượng agent container phía sau Nginx giúp tăng tổng sức chứa chịu tải đồng thời (throughput capacity), nhưng **không thể rút ngắn độ trễ nội tại của cuộc gọi mạng ra LLM**.
+- **Giải pháp tối ưu đúng đắn trong thực tế:**
+  1. *Semantic Caching:* Cache các câu hỏi tương tự trên Redis bằng vector embeddings để trả lời trong < 10 ms mà không cần gọi LLM.
+  2. *Streaming Response (SSE):* Trả token đầu tiên (TTFT) trong < 200 ms để mang lại cảm giác phản hồi tức thì cho người dùng.
+  3. *Request Hedging / Speculative Execution:* Khi một request gọi LLM vượt quá ngưỡng 500 ms, tự động bắn một request song song sang endpoint hoặc model dự phòng.
+
+---
+
+## 6. Kết luận
+
+- 3 điều bạn học được về benchmark & observability:
+  1. **Average là chỉ số đánh lừa nguy hiểm — SLO bắt buộc phải đặt theo Percentile (p95/p99):** Một hệ thống có `avg = 225 ms` vẫn có thể có `p99 = 1700 ms` khiến 1-5% người dùng chịu trải nghiệm tồi tệ. SLO và alert bắt buộc phải dựa trên p95/p99.
+  2. **Metrics cho biết "có sự cố", nhưng Tracing mới cho biết "nguyên nhân ở đâu":** Prometheus phát hiện p95 tăng cao, nhưng chỉ khi mở Jaeger trace ta mới nhìn thấy span `chat mock-llm-small` chiếm tới 98% tổng thời gian request do tail latency từ upstream model.
+  3. **Khoảng cách giữa System Health và AI Semantic Quality:** Một AI agent có thể "xanh" 100% trên dashboard hạ tầng (200 OK, latency thấp) nhưng câu trả lời lại hoàn toàn sai lệch hoặc vô dụng. Observability toàn diện cho AI agent phải kết hợp cả Golden Signals hạ tầng lẫn Continuous Evaluation chất lượng ngữ nghĩa.
+- Nếu đưa agent này lên production thật, bạn sẽ thêm metric / alert nào nữa?
+  1. **Metric TTFT (Time To First Token) & Token Generation Rate (tokens/s):** Đo lường trực tiếp độ trễ cảm nhận của người dùng đối với các endpoint streaming SSE.
+  2. **Semantic Cache Hit Ratio:** Đo tỷ lệ câu hỏi được giải quyết trực tiếp từ Redis cache để tối ưu hóa chi phí API token.
+  3. **Alert LLM Provider Rate-Limit / Quota Exhaustion:** Cảnh báo ngay khi nhận mã HTTP 429 từ nhà cung cấp LLM (OpenAI, Anthropic, Gemini) để tự động failover sang provider dự phòng.
+  4. **Alert Semantic Drift / Low Confidence Score:** Cảnh báo khi cosine similarity giữa câu hỏi người dùng và tri thức trong vector database xuống thấp, báo hiệu người dùng đang hỏi những chủ đề chưa có trong Knowledge Base.

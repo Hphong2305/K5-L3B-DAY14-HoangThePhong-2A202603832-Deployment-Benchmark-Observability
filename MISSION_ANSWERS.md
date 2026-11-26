@@ -145,3 +145,132 @@ $ curl -s -X POST http://localhost/ask \
   -d '{"question": "Explain microservices"}'
 {"question":"Explain microservices","answer":"Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic."}
 ```
+
+---
+
+## Part 4: API Security
+
+### Exercise 4.1: API Key Authentication (`04-api-gateway/develop/app.py`)
+
+- **API key được check ở đâu?**
+  - Tại dependency `verify_api_key(api_key: str = Security(api_key_header))` (dòng 39–54), đọc header `X-API-Key` bằng `APIKeyHeader(name="X-API-Key", auto_error=False)` và được gắn vào endpoint `POST /ask` qua `_key: str = Depends(verify_api_key)`.
+- **Điều gì xảy ra nếu thiếu hoặc sai key?**
+  - Nếu thiếu header `X-API-Key` (`not api_key`): trả về `HTTP 401 Unauthorized` với thông báo `"Missing API key. Include header: X-API-Key: <your-key>"`.
+  - Nếu gửi sai key (`api_key != API_KEY`): trả về `HTTP 403 Forbidden` (hoặc `401` theo chuẩn hợp đồng ở Part 6).
+- **Làm sao để rotate key không gây downtime?**
+  - Đọc danh sách các key hợp lệ từ biến môi trường (ví dụ `AGENT_API_KEYS="new-key,old-key"` hoặc lưu hash trong Redis/DB với TTL). Khi rotate: thêm `new-key` song song với `old-key`, cập nhật client sang `new-key`, sau khi hết traffic dùng `old-key` thì thu hồi `old-key` và restart/reload cấu hình.
+
+**Kết quả test bản `develop` (`AGENT_API_KEY=secret-key-123`):**
+
+```bash
+# 1. Không có X-API-Key -> 401
+$ curl -i http://localhost:8000/ask -X POST -H "Content-Type: application/json" -d '{"question": "Hello"}'
+HTTP/1.1 401 Unauthorized
+content-type: application/json
+
+{"detail":"Missing API key. Include header: X-API-Key: <your-key>"}
+
+# 2. Có X-API-Key hợp lệ -> 200
+$ curl -i http://localhost:8000/ask -X POST -H "X-API-Key: secret-key-123" -H "Content-Type: application/json" -d '{"question": "Hello"}'
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"question":"Hello","answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé."}
+```
+
+---
+
+### Exercise 4.2 & 4.3: JWT Authentication & Rate Limiting (`04-api-gateway/production/`)
+
+- **Thuật toán Rate Limiting sử dụng:** **Sliding Window Counter** (lưu danh sách/deque các timestamp của request trong cửa sổ `window_seconds = 60` giây; mỗi lần gọi sẽ loại bỏ các timestamp cũ `< now - 60`).
+- **Giới hạn (Limit):**
+  - Role `user` (`rate_limiter_user`, tài khoản `student` / `demo123`): **10 requests / phút (60 giây)**.
+  - Role `admin` (`rate_limiter_admin`, tài khoản `teacher` / `teach456`): **100 requests / phút (60 giây)**.
+- **Cách phân biệt / nới giới hạn cho Admin:**
+  - Khi user đăng nhập ở `POST /auth/token`, server tạo JWT chứa payload `{"sub": username, "role": role, "exp": ...}` được ký bằng `JWT_SECRET`. Khi gọi `POST /ask`, `verify_token` giải mã JWT lấy `user["role"]`, từ đó chọn `rate_limiter_admin` nếu `role == "admin"` hoặc `rate_limiter_user` nếu `role == "user"`.
+
+**Kết quả chạy thực tế với `curl -i` (đã che JWT token):**
+
+```bash
+# 1. Gọi POST /ask không có JWT token -> 401 Unauthorized
+$ curl -i -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Hello"}'
+HTTP/1.1 401 Unauthorized
+date: Thu, 26 Nov 2026 08:31:06 GMT
+server: uvicorn
+www-authenticate: Bearer
+content-length: 76
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+
+{"detail":"Authentication required. Include: Authorization: Bearer <token>"}
+
+# 2. Lấy JWT token tại POST /auth/token với tài khoản student / demo123
+$ curl -s -X POST http://localhost:8000/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"username": "student", "password": "demo123"}'
+{"access_token":"eyJhbGciOiJIUzI...<REDACTED>","token_type":"bearer","expires_in_minutes":60}
+
+# 3. Gọi vòng lặp với Bearer token: Request #1..#10 trả 200 OK, từ Request #11 trả 429 Too Many Requests
+# --- Request #1 (200 OK) ---
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 08:31:06 GMT
+server: uvicorn
+content-length: 210
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+
+{"question":"Test 1","answer":"Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic.","usage":{"requests_remaining":9,"budget_remaining_usd":2.1e-05}}
+
+# --- Request #10 (200 OK - còn 0 request trong window) ---
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 08:31:07 GMT
+server: uvicorn
+content-length: 181
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+
+{"question":"Test 10","answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé.","usage":{"requests_remaining":0,"budget_remaining_usd":0.000186}}
+
+# --- Request #11 (429 Too Many Requests) ---
+HTTP/1.1 429 Too Many Requests
+date: Thu, 26 Nov 2026 08:31:07 GMT
+server: uvicorn
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1795681928
+retry-after: 59
+content-length: 98
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":59}}
+```
+
+---
+
+### Exercise 4.4: Cost Guard Implementation
+
+**Vì sao cần cả Rate Limit lẫn Cost Guard?**
+- **Rate Limit** bảo vệ hệ thống theo **tần suất gọi (requests/phút)** chống spam/DDoS ngắn hạn, nhưng không ngăn được việc user gửi ít request nhưng mỗi request có prompt cực dài hoặc chạy rả rích suốt cả ngày/tháng.
+- **Cost Guard** bảo vệ **ngân sách tiền thật (USD/ngày hoặc USD/tháng)** tính theo số lượng input/output tokens thực tế tiêu thụ trên LLM.
+
+**Cách thiết kế & cài đặt Cost Guard với Redis:**
+1. **Key theo chu kỳ ngày/tháng trong Redis:** Tạo key `cost:daily:<YYYY-MM-DD>` (hoặc `budget:<user_id>:<YYYY-MM>`).
+2. **Kiểm tra trước khi gọi LLM (`check_budget`):** Đọc tổng số tiền đã tiêu từ Redis (`float(r.get(key) or 0.0)`). Nếu `spent >= DAILY_BUDGET_USD`, chặn ngay lập tức và trả `HTTP 402 Payment Required` trước khi tốn tiền gọi LLM API.
+3. **Ghi nhận chi phí sau khi gọi LLM (`record_cost`):** Tính chi phí request dựa trên số token thực tế:
+   $$\text{cost} = \frac{\text{input\_tokens}}{1000} \times 0.00015 + \frac{\text{output\_tokens}}{1000} \times 0.0006$$
+   Sau đó dùng lệnh nguyên tử `r.incrbyfloat(key, cost)` trên Redis để cộng dồn an toàn giữa nhiều worker/instance và đặt `r.expire(key, 86400 * 2)` để tự động dọn key cũ.

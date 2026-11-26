@@ -274,3 +274,101 @@ referrer-policy: strict-origin-when-cross-origin
 3. **Ghi nhận chi phí sau khi gọi LLM (`record_cost`):** Tính chi phí request dựa trên số token thực tế:
    $$\text{cost} = \frac{\text{input\_tokens}}{1000} \times 0.00015 + \frac{\text{output\_tokens}}{1000} \times 0.0006$$
    Sau đó dùng lệnh nguyên tử `r.incrbyfloat(key, cost)` trên Redis để cộng dồn an toàn giữa nhiều worker/instance và đặt `r.expire(key, 86400 * 2)` để tự động dọn key cũ.
+
+---
+
+## Part 5: Scaling & Reliability
+
+### Exercise 5.1: Liveness (`GET /health`) vs Readiness (`GET /ready`)
+
+| Tiêu chí | Liveness Probe (`GET /health`) | Readiness Probe (`GET /ready`) |
+|----------|--------------------------------|--------------------------------|
+| **Câu hỏi trả lời** | Process của container còn sống không hay đã treo/deadlock? | Instance này có sẵn sàng nhận và xử lý user traffic ngay lúc này không? |
+| **Kiểm tra gì?** | Chỉ kiểm tra bản thân HTTP event loop của ứng dụng (`return {"status": "ok"}`, luôn trả `200` kể cả khi Redis/DB sập). | Kiểm tra các phụ thuộc bên ngoài bắt buộc như `redis.ping()`, kết nối DB, model đã nạp xong chưa. |
+| **Khi trả về lỗi (`503` / timeout)** | Platform (Kubernetes / Cloud Run / Railway) **kill và restart lại container**. | Load Balancer **tạm ngừng route traffic mới** vào instance đó nhưng **không restart** container. |
+| **Vì sao `/health` không nên phụ thuộc Redis?** | Nếu Redis tạm thời gián đoạn mà `/health` trả `503`, orchestrator sẽ restart toàn bộ dàn container agent liên tục (cascading restart loop) dù bản thân process agent không bị lỗi. |
+
+---
+
+### Exercise 5.2: Graceful Shutdown (`SIGTERM`)
+
+- Khi container bị dừng (`docker stop`, scale down, hoặc rolling deploy), hệ thống gửi tín hiệu `SIGTERM` tới tiến trình PID 1 trước, chờ một khoảng grace period (mặc định 10–30 giây) rồi mới gửi `SIGKILL`.
+- Để tắt êm (Graceful Shutdown):
+  1. Trong `Dockerfile`, `uvicorn` phải chạy ở **PID 1** (dùng exec form `CMD ["sh", "-c", "exec uvicorn ..."]`).
+  2. Khi nhận `SIGTERM`, `uvicorn` ngừng nhận kết nối mới, chờ các request in-flight xử lý xong và trả `200 OK`, sau đó chạy phần sau `yield` trong `lifespan(app)` của FastAPI để đóng kết nối Redis/DB rồi thoát với `exit code 0`.
+  3. Lưu ý: Nếu tự đăng ký `signal.signal(signal.SIGTERM, handler)` để ghi log, bắt buộc phải gọi lại signal handler gốc của `uvicorn`, nếu không sẽ ghi đè làm `uvicorn` không bao giờ tự thoát.
+
+---
+
+### Exercise 5.3: Stateless Design
+
+- **Vì sao giữ state trong RAM (`conversation_history = {}`) bị hỏng khi chạy nhiều instance?**
+  - Khi scale ngang lên 3 instances (`agent-1`, `agent-2`, `agent-3`) đứng sau Load Balancer (Nginx round-robin), mỗi container có không gian bộ nhớ (RAM) độc lập.
+  - Nếu Request 1 của User A rơi vào `agent-1` (lưu lịch sử hội thoại hoặc bộ đếm rate limit vào RAM của `agent-1`), thì khi Request 2 của User A được Nginx điều phối sang `agent-2`, `agent-2` hoàn toàn không biết lịch sử trước đó hay số lượt đã gọi của User A. Đồng thời nếu `agent-1` restart, toàn bộ dữ liệu trong RAM mất sạch.
+- **Giải pháp Stateless:** Đẩy toàn bộ state (session, conversation history, rate limit counters, cost counters) ra kho lưu trữ tập trung tốc độ cao là **Redis** (`session:<session_id>`, `ratelimit:<key>`, `cost:daily:<date>`). Nhờ đó bất kỳ instance nào cũng đọc/ghi chung một nguồn sự thật.
+
+---
+
+### Exercise 5.4 & 5.5: Load Balancing & Stateless Test (`05-scaling-reliability/production/`)
+
+Chạy stack với 3 instances (`docker compose -p k5-day14-scaling up -d --build --scale agent=3`) mở cổng `8080` (`POST /chat`) và chạy `python test_stateless.py`:
+
+```text
+$ docker compose -p k5-day14-scaling up -d --build --scale agent=3
+ ✔ Container k5-day14-scaling-redis-1  Healthy
+ ✔ Container k5-day14-scaling-agent-1  Started
+ ✔ Container k5-day14-scaling-agent-2  Started
+ ✔ Container k5-day14-scaling-agent-3  Started
+ ✔ Container k5-day14-scaling-nginx-1  Started
+
+$ python test_stateless.py
+============================================================
+Stateless Scaling Demo
+============================================================
+
+Session ID: 601bc66c-8443-4503-8e64-e43b584d93cd
+
+Request 1: [instance-3f1bda]
+  Q: What is Docker?
+  A: Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!...
+
+Request 2: [instance-981376]
+  Q: Why do we need containers?
+  A: Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé....
+
+Request 3: [instance-36437d]
+  Q: What is Kubernetes?
+  A: Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé....
+
+Request 4: [instance-3f1bda]
+  Q: How does load balancing work?
+  A: Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ O...
+
+Request 5: [instance-981376]
+  Q: What is Redis used for?
+  A: Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé....
+
+------------------------------------------------------------
+Total requests: 5
+Instances used: {'instance-981376', 'instance-3f1bda', 'instance-36437d'}
+✅ All requests served despite different instances!
+
+--- Conversation History ---
+Total messages: 10
+  [user]: What is Docker?...
+  [assistant]: Container là cách đóng gói app để chạy ở mọi nơi. Build once...
+  [user]: Why do we need containers?...
+  [assistant]: Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đ...
+  [user]: What is Kubernetes?...
+  [assistant]: Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đ...
+  [user]: How does load balancing work?...
+  [assistant]: Đây là câu trả lời từ AI agent (mock). Trong production, đây...
+  [user]: What is Redis used for?...
+  [assistant]: Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đ...
+
+✅ Session history preserved across all instances via Redis!
+```
+
+**Giải thích kết quả:**
+- 5 câu hỏi liên tiếp trong cùng một `session_id` (`601bc66c-8443-4503-8e64-e43b584d93cd`) được Nginx phân phối xoay vòng (round-robin) qua cả 3 container agent khác nhau (`instance-3f1bda`, `instance-981376`, `instance-36437d`).
+- Khi gọi `GET /chat/{session_id}/history`, toàn bộ **10 messages** (5 cặp `user`/`assistant`) vẫn được lưu giữ đầy đủ và đúng thứ tự nhờ mọi instance đều đọc/ghi chung key `session:601bc66c-8443-4503-8e64-e43b584d93cd` trên Redis.

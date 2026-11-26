@@ -477,16 +477,17 @@ Kết quả chạy `python check_production_ready.py` đầy đủ (với Docker
 
 ### Exercise 3.1: Cloud Deployment (`06-lab-complete/`)
 
-- **Platform:** Railway / Render (cấu hình đầy đủ trong `06-lab-complete/railway.toml`, `06-lab-complete/render.yaml` và `DEPLOYMENT.md`)
-- **Public URL:** `https://day14-production-agent-hoangthephong.up.railway.app` *(xem hướng dẫn đồng bộ URL thực tế từ dashboard trong `DEPLOYMENT.md`)*
+- **Platform:** Render (Web Service Docker Container)
+- **Public URL:** `https://k5-l3b-day14-hoangthephong-2a202603832.onrender.com`
 - **Screenshots:**
   - [Deployment dashboard](screenshots/dashboard.png)
   - [Service running](screenshots/running.png)
   - [Test results](screenshots/test.png)
-- **Kết quả 4 lệnh tự kiểm tra ở CP6:**
+- **Kết quả 4 lệnh tự kiểm tra ở CP6 (đo lường thực tế trên Render):**
   ```bash
+  BASE="https://k5-l3b-day14-hoangthephong-2a202603832.onrender.com"
   curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/health"     # 200
-  curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/ready"      # 200
+  curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/ready"      # 503 (hoặc 200 khi Redis kết nối)
   curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -d '{"question":"Hello"}'   # 401
   curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -H "X-API-Key: $AGENT_API_KEY" -d '{"question":"Hello"}'   # 200
   ```

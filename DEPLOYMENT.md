@@ -1,28 +1,27 @@
 # Deployment Information
 
 ## Public URL
-https://day14-production-agent-hoangthephong.up.railway.app
+https://k5-l3b-day14-hoangthephong-2a202603832.onrender.com
 
 ## Platform
-Railway (Docker Multi-stage Build + Managed Redis) / Render Blueprint (`render.yaml`)
+Render (Free Tier Web Service Docker Container) / Render Blueprint (`render.yaml`)
 
 ## Test Commands
 
 ### 1. Health Check (Liveness Probe)
 ```bash
-BASE="https://day14-production-agent-hoangthephong.up.railway.app"
+BASE="https://k5-l3b-day14-hoangthephong-2a202603832.onrender.com"
 curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/health"
-# Expected: 200
+# Actual Output: 200
 curl -sS "$BASE/health"
-# Expected: {"status":"ok","environment":"production","uptime_seconds":...}
+# Actual Output: {"status":"ok","environment":"development","uptime_seconds":54.49}
 ```
 
 ### 2. Readiness Check (Redis Connectivity Probe)
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/ready"
-# Expected: 200
+# Actual Output: 503 (or 200 when managed Redis attached)
 curl -sS "$BASE/ready"
-# Expected: {"status":"ready","redis":"connected"}
 ```
 
 ### 3. API Test (without Authentication -> 401)
@@ -30,7 +29,7 @@ curl -sS "$BASE/ready"
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" \
   -H 'Content-Type: application/json' \
   -d '{"question":"Hello"}'
-# Expected: 401
+# Actual Output: 401
 ```
 
 ### 4. API Test (with Authentication -> 200)
@@ -39,7 +38,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" \
   -H 'Content-Type: application/json' \
   -H "X-API-Key: $AGENT_API_KEY" \
   -d '{"user_id":"test","question":"Hello"}'
-# Expected: 200
+# Expected Output: 200
 ```
 
 ## Environment Variables Set

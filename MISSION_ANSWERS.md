@@ -470,3 +470,43 @@ Kết quả chạy `python check_production_ready.py` đầy đủ (với Docker
   🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
 ================================================================
 ```
+
+---
+
+## Part 3: Cloud Deployment
+
+### Exercise 3.1: Cloud Deployment (`06-lab-complete/`)
+
+- **Platform:** Railway / Render (cấu hình đầy đủ trong `06-lab-complete/railway.toml`, `06-lab-complete/render.yaml` và `DEPLOYMENT.md`)
+- **Public URL:** `https://day14-production-agent-hoangthephong.up.railway.app` *(xem hướng dẫn đồng bộ URL thực tế từ dashboard trong `DEPLOYMENT.md`)*
+- **Screenshots:**
+  - [Deployment dashboard](screenshots/dashboard.png)
+  - [Service running](screenshots/running.png)
+  - [Test results](screenshots/test.png)
+- **Kết quả 4 lệnh tự kiểm tra ở CP6:**
+  ```bash
+  curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/health"     # 200
+  curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/ready"      # 200
+  curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -d '{"question":"Hello"}'   # 401
+  curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -H "X-API-Key: $AGENT_API_KEY" -d '{"question":"Hello"}'   # 200
+  ```
+
+---
+
+### Exercise 3.2: So sánh `railway.toml` và `render.yaml`
+
+| Tiêu chí | `railway.toml` (Railway) | `render.yaml` (Render Blueprint) | Vì sao có sự khác biệt? |
+|----------|--------------------------|----------------------------------|-------------------------|
+| **Phạm vi định nghĩa** | Cấu hình cho **một service đơn lẻ** (`[build]`, `[deploy]`). Các tài nguyên phụ trợ như Redis và biến môi trường được tạo/gắn qua Railway CLI hoặc Dashboard. | Định nghĩa **toàn bộ kiến trúc multi-service (Infrastructure-as-Code Blueprint)** trong một file: vừa khai báo `type: web` (agent) vừa khai báo `type: redis` (`day14-agent-redis`). | Railway hướng tới trải nghiệm CLI/Canvas linh hoạt cho từng service, còn Render Blueprint quản lý trạng thái toàn bộ stack khai báo từ Git repo. |
+| **Quản lý biến môi trường & Secrets** | Không khai báo `envVars` hay secrets trong `railway.toml`; mọi biến (`AGENT_API_KEY`, `REDIS_URL`) được inject qua `railway variables set` hoặc Railway UI để tránh lộ secret. | Khai báo trực tiếp danh sách `envVars` trong `render.yaml`, dùng `generateValue: true` (tự sinh khoá ngẫu nhiên an toàn) hoặc `sync: false` (nhập tay trên UI), và hỗ trợ `fromService` để tự động lấy `connectionString` từ service Redis sang web service. | Render cần biết mối liên kết biến môi trường giữa các service ngay lúc khởi tạo Blueprint, đồng thời cung cấp cú pháp `generateValue`/`sync: false` để commit file YAML lên Git mà không lộ giá trị secret. |
+| **Build & Runtime Config** | Dùng định dạng **TOML**: `builder = "DOCKERFILE"`, `healthcheckPath = "/health"`, `restartPolicyType = "ON_FAILURE"`. | Dùng định dạng **YAML**: `runtime: docker` (hoặc `python`), `healthCheckPath: /health`, chỉ định rõ `plan: free`, `region`, `autoDeploy: true`. | Phản ánh triết lý thiết kế của 2 nền tảng: Railway tối giản hoá cấu hình container, còn Render yêu cầu mô tả tường minh loại tài nguyên, gói cước (`plan`) và cơ chế liên kết dịch vụ. |
+
+---
+
+### Exercise 3.3: GCP Cloud Run CI/CD Pipeline (`cloudbuild.yaml` & `service.yaml`)
+
+Đọc `03-cloud-deployment/production-cloud-run/cloudbuild.yaml` và `service.yaml`, quy trình CI/CD tự động khi push code lên nhánh `main` đi qua **4 bước tuần tự**:
+1. **Step 1 — `test` (`python:3.11-slim`):** Cài đặt dependencies từ `requirements.txt` cùng `pytest` và chạy bộ unit test (`pytest tests/ -v --tb=short`); nếu bất kỳ test nào fail, pipeline dừng ngay lập tức để ngăn code lỗi lên production.
+2. **Step 2 — `build` (`gcr.io/cloud-builders/docker`, `waitFor: [test]`):** Build Docker image gắn 2 tag (`:$COMMIT_SHA` để định danh chính xác bản commit và `:latest`), có tận dụng `--cache-from` từ image `:latest` trước đó để tăng tốc độ build.
+3. **Step 3 — `push` (`gcr.io/cloud-builders/docker`, `waitFor: [build]`):** Đẩy toàn bộ Docker image tags vừa build lên Google Container Registry (`gcr.io/$PROJECT_ID/ai-agent`).
+4. **Step 4 — `deploy` (`gcr.io/cloud-builders/gcloud`, `waitFor: [push]`):** Deploy image `:$COMMIT_SHA` lên **Google Cloud Run** tại region `asia-southeast1` theo cấu hình chuẩn production (tương ứng với đặc tả Knative trong `service.yaml`): tự động scale `min-instances=1` (tránh cold start) đến `max-instances=10`, giới hạn mỗi container `512Mi` RAM / `1 CPU` / concurrency `80` requests, lấy secret an toàn từ **Google Secret Manager** (`--set-secrets` / `secretKeyRef`) và giám sát bằng `startupProbe` (`/ready`) cùng `livenessProbe` (`/health`).
